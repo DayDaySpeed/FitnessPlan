@@ -8,25 +8,94 @@ import '../../providers/app_providers.dart';
 import '../theme/app_theme.dart';
 import '../widgets/form_options.dart';
 
-class OnboardingPage extends ConsumerStatefulWidget {
-  const OnboardingPage({super.key});
+class ProfileEditPage extends ConsumerStatefulWidget {
+  const ProfileEditPage({super.key});
 
   @override
-  ConsumerState<OnboardingPage> createState() => _OnboardingPageState();
+  ConsumerState<ProfileEditPage> createState() => _ProfileEditPageState();
 }
 
-class _OnboardingPageState extends ConsumerState<OnboardingPage> {
-  Sex _sex = Sex.male;
-  ActivityLevel _activity = ActivityLevel.sedentary;
-  FitnessGoal _goal = FitnessGoal.cut;
-  int _age = 23;
-  int _heightCm = 183;
-  double _weightKg = 70;
-  double _targetWeightKg = 65;
-  double _weeklyLossKg = CalorieCalculator.defaultWeeklyLoss;
+class _ProfileEditPageState extends ConsumerState<ProfileEditPage> {
+  late Sex _sex;
+  late ActivityLevel _activity;
+  late FitnessGoal _goal;
+  late int _age;
+  late int _heightCm;
+  late double _weightKg;
+  late double _targetWeightKg;
+  late double _weeklyLossKg;
+  bool _ready = false;
   bool _saving = false;
+  bool _dirty = false;
 
-  Future<void> _showResultAndSave() async {
+  @override
+  void initState() {
+    super.initState();
+    final p = ref.read(profileProvider);
+    if (p != null) {
+      _sex = p.sex;
+      _activity = p.activity;
+      _goal = p.goal;
+      _age = FormOptions.snapInt(FormOptions.ages(), p.age);
+      _heightCm = FormOptions.snapInt(
+        FormOptions.heightsCm(),
+        p.heightCm.round(),
+      );
+      _weightKg = FormOptions.snapDouble(FormOptions.weightsKg(), p.weightKg);
+      final fallbackTarget =
+          (p.weightKg - 5).clamp(30.0, p.weightKg - 0.5).toDouble();
+      final targetOpts = FormOptions.targetWeightsKg(_weightKg);
+      _targetWeightKg = FormOptions.snapDouble(
+        targetOpts.isEmpty ? FormOptions.weightsKg(min: 30, max: 40) : targetOpts,
+        p.targetWeightKg ?? fallbackTarget,
+      );
+      _weeklyLossKg = FormOptions.snapDouble(
+        FormOptions.weeklyLossKg,
+        p.weeklyLossKg ?? CalorieCalculator.defaultWeeklyLoss,
+      );
+      _ready = true;
+    }
+  }
+
+  void _edit(VoidCallback mutate) {
+    setState(() {
+      mutate();
+      _dirty = true;
+    });
+  }
+
+  Future<bool> _confirmDiscard() async {
+    if (!_dirty) return true;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('未保存的更改'),
+        content: const Text('身体档案有未保存的修改，要如何处理？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('继续编辑'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'discard'),
+            child: const Text('丢弃'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (action == 'discard') return true;
+    if (action == 'save') {
+      final ok = await _persist();
+      return ok;
+    }
+    return false;
+  }
+
+  Future<bool> _persist() async {
     setState(() => _saving = true);
     try {
       final targetOptions = FormOptions.cutTargetOptions(_weightKg);
@@ -35,7 +104,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         target = targetOptions.last;
       }
 
-      final profile = await ref.read(profileProvider.notifier).save(
+      await ref.read(profileProvider.notifier).save(
             sex: _sex,
             age: _age,
             heightCm: _heightCm.toDouble(),
@@ -43,44 +112,34 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
             activity: _activity,
             goal: _goal,
             targetWeightKg: _goal == FitnessGoal.cut ? target : null,
-            weeklyLossKg:
-                _goal == FitnessGoal.cut ? _weeklyLossKg : null,
+            weeklyLossKg: _goal == FitnessGoal.cut ? _weeklyLossKg : null,
           );
-      if (!mounted) return;
-
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('每日配额已算出'),
-          content: Text(
-            '${profile.targets.calories} kcal\n'
-            'P ${profile.targets.proteinG.toStringAsFixed(0)} · '
-            'C ${profile.targets.carbG.toStringAsFixed(0)} · '
-            'F ${profile.targets.fatG.toStringAsFixed(0)}\n\n'
-            '详情可在「我的 → 我的档案」查看。',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('开始使用'),
-            ),
-          ],
-        ),
-      );
-      if (mounted) context.go('/today');
+      if (!mounted) return false;
+      setState(() => _dirty = false);
+      return true;
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存失败：$e')),
-        );
-      }
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('保存失败：$e')),
+      );
+      return false;
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
+  Future<void> _saveAndPop() async {
+    final ok = await _persist();
+    if (ok && mounted) context.pop();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final profile = ref.watch(profileProvider);
+    if (!_ready || profile == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     final weeksHint = FormOptions.estimatedCutWeeksLabel(
       goal: _goal,
       weightKg: _weightKg,
@@ -90,17 +149,27 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     final targetOptions = FormOptions.cutTargetOptions(_weightKg);
     final targetValue = FormOptions.snapDouble(targetOptions, _targetWeightKg);
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('建立身体档案')),
-      body: SafeArea(
-        child: ListView(
+    return PopScope(
+      canPop: !_dirty,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final allow = await _confirmDiscard();
+        if (!allow || !context.mounted) return;
+        context.pop();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('我的档案'),
+          actions: [
+            TextButton(
+              onPressed: _saving || !_dirty ? null : _saveAndPop,
+              child: Text(_saving ? '保存中…' : '保存'),
+            ),
+          ],
+        ),
+        body: ListView(
           padding: const EdgeInsets.all(AppSpacing.formPage),
           children: [
-            Text(
-              '填写身体数据，生成每日热量与营养配额。',
-              style: Theme.of(context).textTheme.bodyLarge,
-            ),
-            const SizedBox(height: 24),
             Text('性别', style: Theme.of(context).textTheme.fieldLabel),
             const SizedBox(height: 8),
             SegmentedButton<Sex>(
@@ -109,7 +178,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
                 ButtonSegment(value: Sex.female, label: Text('女')),
               ],
               selected: {_sex},
-              onSelectionChanged: (s) => setState(() => _sex = s.first),
+              onSelectionChanged: (s) => _edit(() => _sex = s.first),
             ),
             const SizedBox(height: AppSpacing.section),
             AppDropdown<int>(
@@ -117,7 +186,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
               value: FormOptions.snapInt(FormOptions.ages(), _age),
               items: FormOptions.ages(),
               suffixText: '岁',
-              onChanged: (v) => setState(() => _age = v),
+              onChanged: (v) => _edit(() => _age = v),
             ),
             const SizedBox(height: AppSpacing.field),
             AppDropdown<int>(
@@ -125,7 +194,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
               value: FormOptions.snapInt(FormOptions.heightsCm(), _heightCm),
               items: FormOptions.heightsCm(),
               suffixText: 'cm',
-              onChanged: (v) => setState(() => _heightCm = v),
+              onChanged: (v) => _edit(() => _heightCm = v),
             ),
             const SizedBox(height: AppSpacing.field),
             AppDropdown<double>(
@@ -134,7 +203,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
               items: FormOptions.weightsKg(),
               suffixText: 'kg',
               itemLabel: formatKg,
-              onChanged: (v) => setState(() {
+              onChanged: (v) => _edit(() {
                 _weightKg = v;
                 final opts = FormOptions.targetWeightsKg(v);
                 if (opts.isNotEmpty && _targetWeightKg >= v) {
@@ -148,7 +217,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
               value: _activity,
               items: ActivityLevel.values,
               itemLabel: (e) => e.label,
-              onChanged: (v) => setState(() => _activity = v),
+              onChanged: (v) => _edit(() => _activity = v),
             ),
             const SizedBox(height: AppSpacing.section),
             AppDropdown<FitnessGoal>(
@@ -156,7 +225,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
               value: _goal,
               items: FitnessGoal.values,
               itemLabel: (e) => e.label,
-              onChanged: (v) => setState(() => _goal = v),
+              onChanged: (v) => _edit(() => _goal = v),
             ),
             if (_goal == FitnessGoal.cut) ...[
               const SizedBox(height: AppSpacing.section),
@@ -166,7 +235,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
                 items: targetOptions,
                 suffixText: 'kg',
                 itemLabel: formatKg,
-                onChanged: (v) => setState(() => _targetWeightKg = v),
+                onChanged: (v) => _edit(() => _targetWeightKg = v),
               ),
               const SizedBox(height: AppSpacing.field),
               AppDropdown<double>(
@@ -179,16 +248,13 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
                 suffixText: 'kg',
                 helperText: weeksHint ?? '推荐 0.3–0.8 kg/周',
                 itemLabel: (v) => v.toStringAsFixed(1),
-                onChanged: (v) => setState(() => _weeklyLossKg = v),
+                onChanged: (v) => _edit(() => _weeklyLossKg = v),
               ),
             ],
-            const SizedBox(height: 32),
+            const SizedBox(height: AppSpacing.section),
             FilledButton(
-              onPressed: _saving ? null : _showResultAndSave,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(_saving ? '计算中…' : '计算并开始'),
-              ),
+              onPressed: _saving || !_dirty ? null : _saveAndPop,
+              child: Text(_saving ? '保存中…' : '保存'),
             ),
           ],
         ),
